@@ -5,6 +5,8 @@ metadata:
 spec:
   validationActions: [Deny]
   failurePolicy: Fail
+  webhookConfiguration:
+    timeoutSeconds: 15
   evaluation:
     background:
       enabled: false
