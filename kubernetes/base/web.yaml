@@ -44,9 +44,9 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
-            - name: gunicorn
-              mountPath: /home/nonroot/.gunicorn
           env:
+            - name: GUNICORN_CMD_ARGS
+              value: --no-control-socket
             - name: VOTES_URL
               value: http://votes:8081
             - name: OTEL_SERVICE_NAME
@@ -64,8 +64,6 @@ spec:
               containerPort: 8080
       volumes:
         - name: tmp
-          emptyDir: {}
-        - name: gunicorn
           emptyDir: {}
 ---
 apiVersion: v1
