@@ -20,6 +20,13 @@ helmCharts:
     releaseName: envoy-gateway
     namespace: envoy-gateway-system
     includeCRDs: true
+  - name: kyverno
+    repo: https://kyverno.github.io/kyverno/
+    version: 3.9.1
+    releaseName: kyverno
+    namespace: kyverno
+    includeCRDs: true
+    skipHooks: true
   - name: opentelemetry-collector
     repo: https://open-telemetry.github.io/opentelemetry-helm-charts
     version: 0.165.0
