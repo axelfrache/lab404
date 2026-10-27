@@ -6,8 +6,8 @@ metadata:
   labels:
     app.kubernetes.io/part-of: lab404
 spec:
-  validationActions: [Audit]
-  failurePolicy: Ignore
+  validationActions: [Deny]
+  failurePolicy: Fail
   evaluation:
     admission:
       enabled: true
@@ -39,8 +39,8 @@ metadata:
   labels:
     app.kubernetes.io/part-of: lab404
 spec:
-  validationActions: [Audit]
-  failurePolicy: Ignore
+  validationActions: [Deny]
+  failurePolicy: Fail
   evaluation:
     admission:
       enabled: true
