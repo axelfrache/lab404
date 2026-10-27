@@ -10,12 +10,37 @@ on:
 
 permissions:
   contents: read
-  packages: write
+
+concurrency:
+  group: images-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  build:
-    name: Build ${{ matrix.service }} for ${{ matrix.arch }}
+  lint:
+    name: Hadolint ${{ matrix.service }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [web, votes]
+
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: jdx/mise-action@08ae2a091c038e1e05ec6f5115dc5c69d5a2a6b8 # v5.1.2
+        with:
+          install_args: hadolint
+
+      - name: Lint Dockerfile
+        run: hadolint apps/${{ matrix.service }}/Dockerfile
+
+  build:
+    name: Build ${{ matrix.service }} for ${{ matrix.target.arch }}
+    needs: lint
+    runs-on: ${{ matrix.target.runner }}
+    permissions:
+      contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -23,13 +48,13 @@ jobs:
         target:
           - platform: linux/amd64
             arch: amd64
+            runner: ubuntu-24.04
           - platform: linux/arm64
             arch: arm64
+            runner: ubuntu-24.04-arm
 
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-
-      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
 
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
@@ -39,18 +64,27 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: dhi.io
+          username: ${{ secrets.DHI_USERNAME }}
+          password: ${{ secrets.DHI_TOKEN }}
+
       - id: image
         name: Set image name
         env:
           OWNER: ${{ github.repository_owner }}
         run: echo "name=ghcr.io/${OWNER,,}/lab404-${{ matrix.service }}" >> "$GITHUB_OUTPUT"
 
+      # Without attestations the pushed digest is the plain platform manifest.
       - id: build
         name: Build and push by digest
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: apps/${{ matrix.service }}
           platforms: ${{ matrix.target.platform }}
+          provenance: false
+          sbom: false
           labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
           outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true
 
@@ -68,10 +102,129 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  merge:
-    name: Publish ${{ matrix.service }} index
+  trivy:
+    name: Trivy ${{ matrix.service }} ${{ matrix.arch }}
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [web, votes]
+        arch: [amd64, arm64]
+    env:
+      TRIVY_USERNAME: ${{ github.actor }}
+      TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: jdx/mise-action@08ae2a091c038e1e05ec6f5115dc5c69d5a2a6b8 # v5.1.2
+        with:
+          install_args: trivy
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: digests-${{ matrix.service }}-${{ matrix.arch }}
+          path: /tmp/digest
+
+      - id: image
+        name: Resolve platform digest
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          digest="$(ls /tmp/digest)"
+          echo "ref=ghcr.io/${OWNER,,}/lab404-${{ matrix.service }}@sha256:${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate report and SBOM
+        env:
+          REF: ${{ steps.image.outputs.ref }}
+        run: |
+          mkdir -p evidence
+          trivy image --image-src remote --format json --output evidence/trivy.json "$REF"
+          trivy image --image-src remote --skip-db-update --format cyclonedx --output evidence/sbom.cdx.json "$REF"
+          echo "$REF" > evidence/image.txt
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: evidence-trivy-${{ matrix.service }}-${{ matrix.arch }}
+          path: evidence/
+          retention-days: 14
+
+      - name: Fail on fixable high and critical findings
+        env:
+          REF: ${{ steps.image.outputs.ref }}
+        run: |
+          trivy image --image-src remote --skip-db-update \
+            --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "$REF"
+
+  dockle:
+    name: Dockle ${{ matrix.service }} ${{ matrix.arch }}
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [web, votes]
+        arch: [amd64, arm64]
+    env:
+      DOCKLE_USERNAME: ${{ github.actor }}
+      DOCKLE_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: jdx/mise-action@08ae2a091c038e1e05ec6f5115dc5c69d5a2a6b8 # v5.1.2
+        with:
+          install_args: dockle
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: digests-${{ matrix.service }}-${{ matrix.arch }}
+          path: /tmp/digest
+
+      - id: image
+        name: Resolve platform digest
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          digest="$(ls /tmp/digest)"
+          echo "ref=ghcr.io/${OWNER,,}/lab404-${{ matrix.service }}@sha256:${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate report
+        env:
+          REF: ${{ steps.image.outputs.ref }}
+        run: |
+          mkdir -p evidence
+          dockle --format json --output evidence/dockle.json "$REF"
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: evidence-dockle-${{ matrix.service }}-${{ matrix.arch }}
+          path: evidence/
+          retention-days: 14
+
+      - name: Fail on warnings and above
+        env:
+          REF: ${{ steps.image.outputs.ref }}
+        run: dockle --exit-code 1 --exit-level warn "$REF"
+
+  publish:
+    name: Publish ${{ matrix.service }} index
+    needs: [trivy, dockle]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     strategy:
       matrix:
         service: [web, votes]
@@ -102,7 +255,48 @@ jobs:
         env:
           IMAGE: ${{ steps.image.outputs.name }}
         run: |
-          docker buildx imagetools create \
-            --tag "${IMAGE}:latest" \
+          tags=(--tag "${IMAGE}:sha-${GITHUB_SHA}")
+          if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            tags+=(--tag "${IMAGE}:latest")
+          fi
+          docker buildx imagetools create "${tags[@]}" \
             $(printf "${IMAGE}@sha256:%s " *)
-          docker buildx imagetools inspect "${IMAGE}:latest"
+          docker buildx imagetools inspect "${IMAGE}:sha-${GITHUB_SHA}"
+
+      - name: Record index digest
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+        run: |
+          digest="$(docker buildx imagetools inspect "${IMAGE}:sha-${GITHUB_SHA}" \
+            --format '{{json .Manifest}}' | jq -r .digest)"
+          mkdir -p /tmp/index
+          echo "${IMAGE}@${digest}" > "/tmp/index/${{ matrix.service }}.txt"
+
+      - name: Upload index digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: index-${{ matrix.service }}
+          path: /tmp/index/*
+          if-no-files-found: error
+          retention-days: 14
+
+  evidence:
+    name: Upload evidence
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: "{evidence-*,index-*}"
+          path: evidence
+
+      - name: Upload evidence bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image-evidence
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 90
